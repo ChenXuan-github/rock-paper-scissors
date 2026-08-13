@@ -1,17 +1,23 @@
 package main
 
 import (
-	"github.com/gin-gonic/gin"
+	"fmt"
+	"log"
+
+	"github.com/ChenXuan-github/rock-paper-scissors/internal/api/router"
+	"github.com/ChenXuan-github/rock-paper-scissors/internal/config"
 )
 
 func main() {
-	r := gin.Default()
+	cfg, err := config.Load("configs/application.yml")
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	r.GET("/ping", func(c *gin.Context) {
-		c.JSON(200, gin.H{
-			"message": "pong",
-		})
-	})
+	r := router.New()
+	address := fmt.Sprintf(":%d", cfg.Server.Port)
 
-	r.Run(":8080")
+	if err := r.Run(address); err != nil {
+		log.Fatal(err)
+	}
 }

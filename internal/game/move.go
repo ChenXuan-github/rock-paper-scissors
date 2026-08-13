@@ -1,5 +1,7 @@
 package game
 
+import "fmt"
+
 type Move int
 
 const (
@@ -8,24 +10,30 @@ const (
 	Paper                // 布
 )
 
-/**
-实际上近似于：
-const (
-    Rock     Move = 0
-    Paper    Move = 1
-    Scissors Move = 2
-)
+// String 返回 Move 对应的字符串。
+func (m Move) String() string {
+	switch m {
+	case Rock:
+		return "rock"
+	case Scissors:
+		return "scissors"
+	case Paper:
+		return "paper"
+	default:
+		return "unknown"
+	}
+}
 
-也就是说：
-Rock     == 0
-Paper    == 1
-Scissors == 2
-
-为什么 Paper 和 Scissors 什么都没写？
-
-这是 Go const 的另一个语法特性。
-
-在同一个 const 块里，如果后面的常量省略表达式：
-
-它会重复上一行的类型和表达式。
-*/
+// ParseMove 把请求中的字符串转换成游戏内部使用的 Move。
+func ParseMove(value string) (Move, error) {
+	switch value {
+	case "rock":
+		return Rock, nil
+	case "scissors":
+		return Scissors, nil
+	case "paper":
+		return Paper, nil
+	default:
+		return 0, fmt.Errorf("invalid move: %q", value)
+	}
+}
