@@ -1,2 +1,21 @@
+# HTTP 服务监听配置。
 server:
   port: 8080
+
+# 本机学习环境的 MySQL 连接参数。
+# 生产环境不应把真实密码明文提交到仓库，应改用密钥管理或环境注入。
+database:
+  driver: mysql
+  host: 127.0.0.1
+  port: 3306
+  name: rock_paper_scissors
+  username: root
+  password: root
+
+jwt:
+  # JWT 的签发者；校验令牌时要求 iss 必须与它相同。
+  issuer: rock-paper-scissors
+  # HS256 对称签名密钥；当前明文仅用于本机学习环境。
+  secret: rock-paper-scissors-local-development-signing-secret
+  # JWT 从签发开始 60 分钟后过期。
+  expiresInMinutes: 60

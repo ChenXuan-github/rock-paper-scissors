@@ -2,6 +2,7 @@ package game
 
 import "testing"
 
+// 以下九个用例覆盖 3×3 的全部出拳组合，既验证游戏规则，也保护取模算法依赖的常量顺序。
 func TestEvaluateRockBeatsScissors(t *testing.T) {
 	result := Evaluate(Rock, Scissors)
 
