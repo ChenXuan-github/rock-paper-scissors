@@ -9,6 +9,7 @@ import (
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/auth"
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/config"
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/database"
+	"github.com/ChenXuan-github/rock-paper-scissors/internal/game"
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/user"
 )
 
@@ -36,9 +37,13 @@ func main() {
 	authHandler := handler.NewAuthHandler(userService, tokenService)
 	// 当前用户接口通过同一个 UserService 查询数据库中的最新用户资料。
 	userHandler := handler.NewUserHandler(userService)
+	// 房间只保存在当前进程内存中；整个服务共享同一个 RoomManager。
+	roomManager := game.NewRoomManager()
+	roomService := game.NewRoomService(roomManager)
+	roomHandler := handler.NewRoomHandler(roomService)
 
 	// 4. 注入 Router：受保护路由通过同一个 TokenService 校验 JWT。
-	r := router.New(authHandler, userHandler, tokenService)
+	r := router.New(authHandler, userHandler, roomHandler, tokenService)
 	// Sprintf 把整数端口拼成 Gin Run 所需的 ":8080" 监听地址。
 	address := fmt.Sprintf(":%d", cfg.Server.Port)
 

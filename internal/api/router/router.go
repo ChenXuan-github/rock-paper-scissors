@@ -11,6 +11,7 @@ import (
 func New(
 	authHandler *handler.AuthHandler,
 	userHandler *handler.UserHandler,
+	roomHandler *handler.RoomHandler,
 	tokenVerifier middleware.TokenVerifier,
 ) *gin.Engine {
 	// Default 创建 Gin 引擎，并自带 Logger 与 Recovery 中间件。
@@ -38,16 +39,25 @@ func New(
 		users.GET("/me", userHandler.Me)
 	}
 
-	// rounds 归组管理所有回合相关接口。
-	rounds := api.Group("/rounds")
-	// 正常启动时 main 会传入 TokenService，因此整个 rounds 路由组都需要 JWT。
-	// 测试可以传 nil，只测试路由自身而不引入真实鉴权依赖。
-	if tokenVerifier != nil {
-		// 请求进入具体 Handler 前，先提取并校验 Authorization Bearer Token。
-		rounds.Use(middleware.Authenticate(tokenVerifier))
+	// 房间接口必须登录后才能调用，创建者身份来自校验通过的 JWT。
+	if roomHandler != nil && tokenVerifier != nil {
+		rooms := api.Group("/rooms")
+		rooms.Use(middleware.Authenticate(tokenVerifier))
+		// 最终地址：GET /api/v1/rooms，读取当前全部房间。
+		rooms.GET("", roomHandler.List)
+		// 最终地址：GET /api/v1/rooms/me，恢复当前玩家自己的房间与回合状态。
+		rooms.GET("/me", roomHandler.Current)
+		// 最终地址：POST /api/v1/rooms。
+		rooms.POST("", roomHandler.Create)
+		// 最终地址：POST /api/v1/rooms/:roomID/join。
+		rooms.POST("/:roomID/join", roomHandler.Join)
+		// 最终地址：POST /api/v1/rooms/me/start，只有当前房主可以调用。
+		rooms.POST("/me/start", roomHandler.Start)
+		// 最终地址：POST /api/v1/rooms/me/move，当前玩家只提交自己的拳。
+		rooms.POST("/me/move", roomHandler.SubmitMove)
+		// 最终地址：DELETE /api/v1/rooms/me，表示当前用户退出所在房间。
+		rooms.DELETE("/me", roomHandler.LeaveCurrent)
 	}
-	// 最终地址：POST /api/v1/rounds/evaluate。
-	rounds.POST("/evaluate", handler.EvaluateRound)
 
 	// main 会对配置完成的 Engine 调用 Run，真正启动 HTTP 服务。
 	return r
