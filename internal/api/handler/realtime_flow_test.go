@@ -60,7 +60,7 @@ func TestTwoWebSocketClientsReceiveMoveAndSettlementEvents(t *testing.T) {
 	hub := realtime.NewHub()
 	go hub.Run(ctx)
 
-	roomHandler := NewRoomHandler(service, hub)
+	roomHandler := NewRoomHandler(service, hub, nil)
 	webSocketHandler := NewWebSocketHandler(verifier, hub)
 	router := gin.New()
 	router.GET("/api/v1/ws", webSocketHandler.Connect)

@@ -1,14 +1,18 @@
 package handler
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
+	"sort"
 
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/api/middleware"
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/api/response"
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/game"
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/realtime"
+	"github.com/ChenXuan-github/rock-paper-scissors/internal/settlement"
 	"github.com/gin-gonic/gin"
 )
 
@@ -29,21 +33,30 @@ type userEventPusher interface {
 	SendToUser(userID int64, event realtime.Event) error
 }
 
-// RoomHandler 负责房间相关 HTTP 请求与领域对象之间的转换。
-type RoomHandler struct {
-	roomService roomApplicationService
-	eventPusher userEventPusher
+// roundSettlementService 表示 Handler 在一局产生结果后需要的持久化结算能力。
+// 使用小接口后，测试可以注入内存假实现，生产环境注入 *settlement.Service。
+type roundSettlementService interface {
+	Settle(ctx context.Context, command settlement.Command) (settlement.Outcome, error)
 }
 
-// NewRoomHandler 注入房间业务服务；第二个参数可选，用于给在线玩家推送实时事件。
-func NewRoomHandler(roomService roomApplicationService, eventPushers ...userEventPusher) *RoomHandler {
-	var eventPusher userEventPusher
-	if len(eventPushers) > 0 {
-		eventPusher = eventPushers[0]
-	}
+// RoomHandler 负责房间相关 HTTP 请求与领域对象之间的转换。
+type RoomHandler struct {
+	roomService       roomApplicationService
+	eventPusher       userEventPusher
+	settlementService roundSettlementService
+}
+
+// NewRoomHandler 显式注入房间业务、实时推送与持久化结算三个依赖。
+// 单元测试不关心某个外部依赖时可以传 nil。
+func NewRoomHandler(
+	roomService roomApplicationService,
+	eventPusher userEventPusher,
+	settlementService roundSettlementService,
+) *RoomHandler {
 	return &RoomHandler{
-		roomService: roomService,
-		eventPusher: eventPusher,
+		roomService:       roomService,
+		eventPusher:       eventPusher,
+		settlementService: settlementService,
 	}
 }
 
@@ -94,6 +107,8 @@ type submitMoveResponse struct {
 	Move           string  `json:"move"`
 	OpponentMove   *string `json:"opponentMove"`
 	Result         string  `json:"result"`
+	ScoreChange    *int    `json:"scoreChange,omitempty"`
+	ScoreAfter     *int    `json:"scoreAfter,omitempty"`
 }
 
 // roundSettledEventData 是推送给某一名玩家的本局结算视角。
@@ -102,6 +117,8 @@ type roundSettledEventData struct {
 	Move         string `json:"move"`
 	OpponentMove string `json:"opponentMove"`
 	Result       string `json:"result"`
+	ScoreChange  *int   `json:"scoreChange,omitempty"`
+	ScoreAfter   *int   `json:"scoreAfter,omitempty"`
 }
 
 // moveSubmittedEventData 只公布提交人数，绝不包含尚未结算的具体拳型。
@@ -379,6 +396,17 @@ func (h *RoomHandler) SubmitMove(c *gin.Context) {
 
 	// 未结算时不返回其他玩家的出拳；第二人提交完成结算后才公开双方选择。
 	if roundState.Settled {
+		// 只有 MySQL 事务成功后，才允许返回并推送正式结算结果。
+		settlementOutcome, err := h.persistRoundSettlement(c.Request.Context(), userID, roundState)
+		if err != nil {
+			log.Printf("persist round settlement: %v", err)
+			c.JSON(http.StatusInternalServerError, response.Error(
+				response.CodeInternalError,
+				"settlement persistence failed",
+			))
+			return
+		}
+
 		for submittedUserID, submittedMove := range roundState.Moves {
 			if submittedUserID != userID {
 				opponentMove := submittedMove.String()
@@ -386,9 +414,10 @@ func (h *RoomHandler) SubmitMove(c *gin.Context) {
 				break
 			}
 		}
+		moveResponse.ScoreChange, moveResponse.ScoreAfter = settlementScoreForUser(settlementOutcome, userID)
 
 		// 第二名玩家提交后已经产生完整结果，此时主动把双方各自的视角推送出去。
-		h.pushRoundSettled(roundState)
+		h.pushRoundSettled(roundState, settlementOutcome)
 	} else {
 		// 第一名玩家提交后只通知对手“已有一人提交”，不发送具体拳型。
 		h.pushMoveSubmitted(userID, roundState.SubmittedCount)
@@ -396,6 +425,49 @@ func (h *RoomHandler) SubmitMove(c *gin.Context) {
 
 	// 无论当前是等待还是已经结算，只要本次提交成功，HTTP 状态都返回 200。
 	c.JSON(http.StatusOK, response.Success(moveResponse))
+}
+
+// persistRoundSettlement 把无固定顺序的 RoundState Map 整理成稳定的双方记录，
+// 再交给 SettlementService 用一个 MySQL 事务更新积分并写入战绩。
+func (h *RoomHandler) persistRoundSettlement(
+	ctx context.Context,
+	currentUserID int64,
+	roundState game.RoundStateSnapshot,
+) (settlement.Outcome, error) {
+	// 测试某些纯房间行为时可以不注入数据库结算服务。
+	if h.settlementService == nil {
+		return settlement.Outcome{}, nil
+	}
+
+	// RoundState 不保存房间号，因此从当前用户所在房间的安全快照取得 RoomID。
+	roomSnapshot, err := h.roomService.GetCurrentRoom(currentUserID)
+	if err != nil {
+		return settlement.Outcome{}, fmt.Errorf("load room for settlement: %w", err)
+	}
+
+	userIDs := make([]int64, 0, len(roundState.Moves))
+	for userID := range roundState.Moves {
+		userIDs = append(userIDs, userID)
+	}
+	if len(userIDs) != 2 {
+		return settlement.Outcome{}, fmt.Errorf("settled round contains %d moves, want 2", len(userIDs))
+	}
+	// Go Map 没有遍历顺序，按用户 ID 排序后，战绩中的 Player1/Player2 方向保持稳定。
+	sort.Slice(userIDs, func(i, j int) bool {
+		return userIDs[i] < userIDs[j]
+	})
+
+	outcome, err := h.settlementService.Settle(ctx, settlement.Command{
+		RoomID:      roomSnapshot.Room.ID,
+		Player1ID:   userIDs[0],
+		Player1Move: roundState.Moves[userIDs[0]],
+		Player2ID:   userIDs[1],
+		Player2Move: roundState.Moves[userIDs[1]],
+	})
+	if err != nil {
+		return settlement.Outcome{}, fmt.Errorf("settle round transaction: %w", err)
+	}
+	return outcome, nil
 }
 
 // pushMoveSubmitted 把不含拳型的提交进度推送给同房间的其他玩家。
@@ -427,7 +499,7 @@ func (h *RoomHandler) pushMoveSubmitted(submitterUserID int64, submittedCount in
 
 // pushRoundSettled 给本局两名玩家分别组装并推送自己的结果视角。
 // WebSocket 离线或发送队列异常不影响已经完成的领域结算，只记录日志供排查。
-func (h *RoomHandler) pushRoundSettled(roundState game.RoundStateSnapshot) {
+func (h *RoomHandler) pushRoundSettled(roundState game.RoundStateSnapshot, outcome settlement.Outcome) {
 	if h.eventPusher == nil {
 		return
 	}
@@ -445,6 +517,7 @@ func (h *RoomHandler) pushRoundSettled(roundState game.RoundStateSnapshot) {
 				break
 			}
 		}
+		scoreChange, scoreAfter := settlementScoreForUser(outcome, userID)
 
 		err := h.eventPusher.SendToUser(userID, realtime.Event{
 			Type: "round_settled",
@@ -452,11 +525,30 @@ func (h *RoomHandler) pushRoundSettled(roundState game.RoundStateSnapshot) {
 				Move:         ownMove.String(),
 				OpponentMove: opponentMove.String(),
 				Result:       result.String(),
+				ScoreChange:  scoreChange,
+				ScoreAfter:   scoreAfter,
 			},
 		})
 		if err != nil {
 			log.Printf("push round result to user %d: %v", userID, err)
 		}
+	}
+}
+
+// settlementScoreForUser 从事务提交后的双方结果中提取指定用户自己的积分变化。
+func settlementScoreForUser(outcome settlement.Outcome, userID int64) (*int, *int) {
+	switch userID {
+	case outcome.Record.Player1ID:
+		change := outcome.Record.Player1ScoreChange
+		after := outcome.Player1Score.Score
+		return &change, &after
+	case outcome.Record.Player2ID:
+		change := outcome.Record.Player2ScoreChange
+		after := outcome.Player2Score.Score
+		return &change, &after
+	default:
+		// 未注入 SettlementService 的纯房间测试没有真实积分数据，因此保持字段缺省。
+		return nil, nil
 	}
 }
 

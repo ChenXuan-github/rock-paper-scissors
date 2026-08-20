@@ -12,6 +12,8 @@ func New(
 	authHandler *handler.AuthHandler,
 	userHandler *handler.UserHandler,
 	roomHandler *handler.RoomHandler,
+	competitionHandler *handler.CompetitionHandler,
+	matchmakingHandler *handler.MatchmakingHandler,
 	webSocketHandler *handler.WebSocketHandler,
 	tokenVerifier middleware.TokenVerifier,
 ) *gin.Engine {
@@ -29,6 +31,25 @@ func New(
 		// 最终地址：/api/v1/auth/register 与 /api/v1/auth/login。
 		auth.POST("/register", authHandler.Register)
 		auth.POST("/login", authHandler.Login)
+	}
+
+	// 积分与战绩同样依赖 JWT，客户端不能通过参数查询并冒充其他用户。
+	if competitionHandler != nil && tokenVerifier != nil {
+		competition := api.Group("")
+		competition.Use(middleware.Authenticate(tokenVerifier))
+		competition.GET("/scores/me", competitionHandler.MyScore)
+		competition.GET("/records/me", competitionHandler.MyRecords)
+		competition.GET("/rankings", competitionHandler.Ranking)
+	}
+
+	// 自动匹配接口只接受当前 JWT 用户，不允许客户端指定任意 userID。
+	if matchmakingHandler != nil && tokenVerifier != nil {
+		matchmakingRoutes := api.Group("/matchmaking")
+		matchmakingRoutes.Use(middleware.Authenticate(tokenVerifier))
+		// 同一个资源使用不同 HTTP 方法表达加入、查询和取消。
+		matchmakingRoutes.POST("/me", matchmakingHandler.Join)
+		matchmakingRoutes.GET("/me", matchmakingHandler.Current)
+		matchmakingRoutes.DELETE("/me", matchmakingHandler.Cancel)
 	}
 
 	// 用户资料接口必须同时具备 Handler 和 JWT 校验器才注册。

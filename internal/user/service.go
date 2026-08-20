@@ -113,3 +113,22 @@ func (s *Service) GetByID(ctx context.Context, id int64) (User, error) {
 
 	return foundUser, nil
 }
+
+// GetByIDs 批量查询用户并按主键建立 Map，便于调用方以 O(1) 时间组装集合结果。
+func (s *Service) GetByIDs(ctx context.Context, ids []int64) (map[int64]User, error) {
+	for _, id := range ids {
+		if id <= 0 {
+			return nil, ErrUserNotFound
+		}
+	}
+
+	foundUsers, err := s.repository.FindByIDs(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("get users by ids: %w", err)
+	}
+	usersByID := make(map[int64]User, len(foundUsers))
+	for _, foundUser := range foundUsers {
+		usersByID[foundUser.ID] = foundUser
+	}
+	return usersByID, nil
+}

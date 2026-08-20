@@ -18,7 +18,7 @@ func TestLegacyEvaluateRouteIsNotRegistered(t *testing.T) {
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 
-	New(nil, nil, nil, nil, nil).ServeHTTP(recorder, request)
+	New(nil, nil, nil, nil, nil, nil, nil).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf(

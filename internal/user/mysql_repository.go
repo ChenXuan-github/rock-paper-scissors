@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	mysqlDriver "github.com/go-sql-driver/mysql"
 )
@@ -84,6 +85,44 @@ func (r *MySQLRepository) FindByID(ctx context.Context, id int64) (User, error) 
 	}
 
 	return user, nil
+}
+
+// FindByIDs 使用一条 IN 查询批量读取用户，供排行榜等集合场景避免逐人查询。
+func (r *MySQLRepository) FindByIDs(ctx context.Context, ids []int64) ([]User, error) {
+	if len(ids) == 0 {
+		return []User{}, nil
+	}
+
+	// IN 中每个值仍使用占位符绑定；只动态生成占位符数量，不拼接用户输入。
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	query := fmt.Sprintf(`
+		SELECT id, username, password_hash, created_at
+		FROM users
+		WHERE id IN (%s)
+	`, placeholders)
+	args := make([]any, len(ids))
+	for index, id := range ids {
+		args[index] = id
+	}
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("find users by ids: %w", err)
+	}
+	defer rows.Close()
+
+	users := make([]User, 0, len(ids))
+	for rows.Next() {
+		var found User
+		if err := rows.Scan(&found.ID, &found.Username, &found.PasswordHash, &found.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan users by ids: %w", err)
+		}
+		users = append(users, found)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate users by ids: %w", err)
+	}
+	return users, nil
 }
 
 // FindByUsername 根据用户名查询用户。

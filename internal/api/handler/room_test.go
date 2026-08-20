@@ -2,7 +2,9 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,6 +14,7 @@ import (
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/auth"
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/game"
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/realtime"
+	"github.com/ChenXuan-github/rock-paper-scissors/internal/settlement"
 	"github.com/gin-gonic/gin"
 )
 
@@ -22,6 +25,19 @@ type roomTestTokenVerifier struct {
 
 type roomTestEventPusher struct {
 	events map[int64][]realtime.Event
+}
+
+type roomTestSettlementService struct {
+	commands []settlement.Command
+	err      error
+}
+
+func (s *roomTestSettlementService) Settle(
+	_ context.Context,
+	command settlement.Command,
+) (settlement.Outcome, error) {
+	s.commands = append(s.commands, command)
+	return settlement.Outcome{}, s.err
 }
 
 func (p *roomTestEventPusher) SendToUser(userID int64, event realtime.Event) error {
@@ -40,7 +56,7 @@ func TestRoomHandlerCreate(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	manager := game.NewRoomManager()
 	service := game.NewRoomService(manager)
-	handler := NewRoomHandler(service)
+	handler := NewRoomHandler(service, nil, nil)
 
 	router := gin.New()
 	router.POST(
@@ -83,7 +99,7 @@ func TestRoomHandlerList(t *testing.T) {
 	if _, err := service.CreateRoom(&game.Player{UserID: 2, Username: "player-2"}); err != nil {
 		t.Fatalf("second CreateRoom() error = %v", err)
 	}
-	handler := NewRoomHandler(service)
+	handler := NewRoomHandler(service, nil, nil)
 
 	router := gin.New()
 	router.GET(
@@ -114,7 +130,7 @@ func TestRoomHandlerCreateRejectsPlayerAlreadyInRoom(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	manager := game.NewRoomManager()
 	service := game.NewRoomService(manager)
-	handler := NewRoomHandler(service)
+	handler := NewRoomHandler(service, nil, nil)
 
 	router := gin.New()
 	router.POST(
@@ -154,7 +170,7 @@ func TestRoomHandlerLeaveCurrentRoom(t *testing.T) {
 	if _, err := service.CreateRoom(&game.Player{UserID: 1, Username: "chenxuan"}); err != nil {
 		t.Fatalf("CreateRoom() error = %v", err)
 	}
-	handler := NewRoomHandler(service)
+	handler := NewRoomHandler(service, nil, nil)
 
 	router := gin.New()
 	router.DELETE(
@@ -197,7 +213,7 @@ func TestRoomHandlerJoin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRoom() error = %v", err)
 	}
-	handler := NewRoomHandler(service)
+	handler := NewRoomHandler(service, nil, nil)
 
 	router := gin.New()
 	router.POST(
@@ -241,7 +257,7 @@ func TestRoomHandlerStartByHost(t *testing.T) {
 	if _, err := service.JoinRoom(room.ID, &game.Player{UserID: 2, Username: "guest"}); err != nil {
 		t.Fatalf("JoinRoom() error = %v", err)
 	}
-	handler := NewRoomHandler(service)
+	handler := NewRoomHandler(service, nil, nil)
 
 	router := gin.New()
 	router.POST(
@@ -282,7 +298,7 @@ func TestRoomHandlerStartRejectsGuest(t *testing.T) {
 	if _, err := service.JoinRoom(room.ID, &game.Player{UserID: 2, Username: "guest"}); err != nil {
 		t.Fatalf("JoinRoom() error = %v", err)
 	}
-	handler := NewRoomHandler(service)
+	handler := NewRoomHandler(service, nil, nil)
 
 	router := gin.New()
 	router.POST(
@@ -319,7 +335,8 @@ func TestRoomHandlerSubmitMoveWaitsThenSettles(t *testing.T) {
 		t.Fatalf("StartCurrentRoom() error = %v", err)
 	}
 	pusher := &roomTestEventPusher{events: make(map[int64][]realtime.Event)}
-	handler := NewRoomHandler(service, pusher)
+	settler := &roomTestSettlementService{}
+	handler := NewRoomHandler(service, pusher, settler)
 
 	performMove := func(userID int64, username, move string) *httptest.ResponseRecorder {
 		router := gin.New()
@@ -385,12 +402,66 @@ func TestRoomHandlerSubmitMoveWaitsThenSettles(t *testing.T) {
 	if settledBody.Data.OpponentMove == nil || *settledBody.Data.OpponentMove != game.Rock.String() {
 		t.Fatalf("settled opponentMove = %#v, want rock", settledBody.Data.OpponentMove)
 	}
+	if len(settler.commands) != 1 {
+		t.Fatalf("settlement calls = %d, want 1", len(settler.commands))
+	}
+	command := settler.commands[0]
+	if command.RoomID != room.ID || command.Player1ID != 1 || command.Player1Move != game.Rock ||
+		command.Player2ID != 2 || command.Player2Move != game.Scissors {
+		t.Fatalf("settlement command = %#v", command)
+	}
 
 	if len(pusher.events[1]) != 1 || len(pusher.events[2]) != 2 {
 		t.Fatalf("pushed events = %#v, want settlement for both players", pusher.events)
 	}
 	assertRoundSettledEvent(t, pusher.events[1][0], "rock", "scissors", "win")
 	assertRoundSettledEvent(t, pusher.events[2][1], "scissors", "rock", "lose")
+}
+
+func TestRoomHandlerDoesNotPushSettlementWhenPersistenceFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := game.NewRoomManager()
+	service := game.NewRoomService(manager)
+	room, err := service.CreateRoom(&game.Player{UserID: 1, Username: "host"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.JoinRoom(room.ID, &game.Player{UserID: 2, Username: "guest"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.StartCurrentRoom(1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SubmitMove(1, game.Rock); err != nil {
+		t.Fatal(err)
+	}
+
+	pusher := &roomTestEventPusher{events: make(map[int64][]realtime.Event)}
+	settler := &roomTestSettlementService{err: errors.New("database unavailable")}
+	handler := NewRoomHandler(service, pusher, settler)
+	router := gin.New()
+	router.POST(
+		"/rooms/me/move",
+		middleware.Authenticate(roomTestTokenVerifier{userID: 2, username: "guest"}),
+		handler.SubmitMove,
+	)
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/rooms/me/move",
+		bytes.NewBufferString(`{"move":"scissors"}`),
+	)
+	request.Header.Set("Authorization", "Bearer test-token")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("HTTP status = %d, want 500; body = %s", recorder.Code, recorder.Body.String())
+	}
+	if len(pusher.events) != 0 {
+		t.Fatalf("events = %#v, want none after persistence failure", pusher.events)
+	}
 }
 
 func assertRoundSettledEvent(
@@ -415,7 +486,7 @@ func assertRoundSettledEvent(
 
 func TestRoomHandlerSubmitMoveRejectsInvalidMove(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	handler := NewRoomHandler(game.NewRoomService(game.NewRoomManager()))
+	handler := NewRoomHandler(game.NewRoomService(game.NewRoomManager()), nil, nil)
 	router := gin.New()
 	router.POST(
 		"/rooms/me/move",
@@ -456,7 +527,7 @@ func TestRoomHandlerCurrentHidesMoveUntilSettlement(t *testing.T) {
 	if _, err := service.SubmitMove(2, game.Scissors); err != nil {
 		t.Fatalf("guest SubmitMove() error = %v", err)
 	}
-	handler := NewRoomHandler(service)
+	handler := NewRoomHandler(service, nil, nil)
 
 	performCurrent := func() *httptest.ResponseRecorder {
 		router := gin.New()
@@ -512,7 +583,7 @@ func TestRoomHandlerCurrentHidesMoveUntilSettlement(t *testing.T) {
 
 func TestRoomHandlerCurrentRejectsPlayerWithoutRoom(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	handler := NewRoomHandler(game.NewRoomService(game.NewRoomManager()))
+	handler := NewRoomHandler(game.NewRoomService(game.NewRoomManager()), nil, nil)
 	router := gin.New()
 	router.GET(
 		"/rooms/me",

@@ -26,7 +26,7 @@ func TestHubRegistersAndUnregistersClient(t *testing.T) {
 	}
 }
 
-func TestHubKeepsNewConnectionWhenOldConnectionUnregisters(t *testing.T) {
+func TestHubReplacesOldConnectionAndKeepsNewOne(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -37,8 +37,19 @@ func TestHubKeepsNewConnectionWhenOldConnectionUnregisters(t *testing.T) {
 	newClient := NewClient(7, "chenxuan", nil)
 	hub.Register(oldClient)
 	hub.Register(newClient)
+	// IsOnline 作为下一条 Hub 请求，确保前面的注册替换已经串行处理完成。
+	if !hub.IsOnline(7) {
+		t.Fatal("new connection should be online")
+	}
 
-	// 被替换的旧连接随后退出时，不能删除同一用户的新连接。
+	select {
+	case <-oldClient.done:
+		// 后建立的新连接必须关闭旧连接。
+	default:
+		t.Fatal("old connection should be disconnected after replacement")
+	}
+
+	// 旧连接随后注销时，不能把同账号刚建立的新连接删掉。
 	hub.Unregister(oldClient)
 	if !hub.IsOnline(7) {
 		t.Fatal("new connection should remain online")

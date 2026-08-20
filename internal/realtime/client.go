@@ -11,6 +11,8 @@ import (
 
 const (
 	clientSendBufferSize = 16
+	// CloseCodeSessionReplaced 是应用自定义关闭码：同账号在另一个客户端建立了新连接。
+	CloseCodeSessionReplaced = 4001
 	// writeWait 限制一帧消息写入客户端的最长时间。
 	writeWait = 10 * time.Second
 	// pongWait 是服务端在没有收到客户端 pong 时允许连接存活的时间。
@@ -127,9 +129,24 @@ func (c *Client) ReadPump() {
 
 // disconnect 只允许 Hub 和 Client 内部调用，保证资源只关闭一次。
 func (c *Client) disconnect() {
+	c.disconnectWithCode(websocket.CloseNormalClosure, "connection closed")
+}
+
+// disconnectSessionReplaced 明确通知旧客户端它已被新登录挤下线。
+func (c *Client) disconnectSessionReplaced() {
+	c.disconnectWithCode(CloseCodeSessionReplaced, "session replaced")
+}
+
+func (c *Client) disconnectWithCode(code int, reason string) {
 	c.closeOnce.Do(func() {
 		close(c.done)
 		if c.connection != nil {
+			// WriteControl 可以与当前写协程并发调用，用关闭帧把原因传给浏览器。
+			_ = c.connection.WriteControl(
+				websocket.CloseMessage,
+				websocket.FormatCloseMessage(code, reason),
+				time.Now().Add(writeWait),
+			)
 			_ = c.connection.Close()
 		}
 	})

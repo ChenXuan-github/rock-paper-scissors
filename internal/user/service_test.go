@@ -52,6 +52,16 @@ func (r *memoryRepository) FindByID(_ context.Context, id int64) (User, error) {
 	return User{}, ErrUserNotFound
 }
 
+func (r *memoryRepository) FindByIDs(_ context.Context, ids []int64) ([]User, error) {
+	result := make([]User, 0, len(ids))
+	for _, id := range ids {
+		if found, err := r.FindByID(context.Background(), id); err == nil {
+			result = append(result, found)
+		}
+	}
+	return result, nil
+}
+
 func TestRegisterHashesPassword(t *testing.T) {
 	// 通过接口注入 memoryRepository，测试只关注 Service 业务规则。
 	repository := newMemoryRepository()
@@ -147,5 +157,20 @@ func TestGetByIDReturnsUser(t *testing.T) {
 	}
 	if foundUser.Username != registeredUser.Username {
 		t.Errorf("username = %q, want %q", foundUser.Username, registeredUser.Username)
+	}
+}
+
+func TestGetByIDsReturnsUsersIndexedByID(t *testing.T) {
+	repository := newMemoryRepository()
+	first, _ := repository.Create(context.Background(), User{Username: "first"})
+	second, _ := repository.Create(context.Background(), User{Username: "second"})
+	service := NewService(repository)
+
+	usersByID, err := service.GetByIDs(context.Background(), []int64{second.ID, first.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usersByID[first.ID].Username != "first" || usersByID[second.ID].Username != "second" {
+		t.Fatalf("usersByID = %#v", usersByID)
 	}
 }

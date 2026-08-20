@@ -6,12 +6,23 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
+// Config 是 application.yml 的根配置对象，由 main 在启动时一次性加载。
 type Config struct {
 	// yaml 标签把结构体字段映射到 application.yml 中对应的配置块。
 	Server   ServerConfig   `yaml:"server"`
 	Database DatabaseConfig `yaml:"database"`
+	Redis    RedisConfig    `yaml:"redis"`
 	// JWT 保存令牌签发和校验共同使用的配置。
 	JWT JWTConfig `yaml:"jwt"`
+}
+
+// RedisConfig 保存 Redis 单机连接参数。
+// Password 为空字符串表示本机 Redis 没有配置密码。
+type RedisConfig struct {
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	Password string `yaml:"password"`
+	Database int    `yaml:"database"`
 }
 
 // ServerConfig 保存 HTTP 服务启动配置。

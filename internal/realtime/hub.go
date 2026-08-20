@@ -22,6 +22,7 @@ type deliveryRequest struct {
 // Hub 是全体 WebSocket 连接的管理中心。
 // clients 只由 Run 所在的一个 goroutine 访问，因此不需要再给 map 加 Mutex。
 type Hub struct {
+	// 当前产品策略是一名用户只保留最后建立的一条实时连接。
 	clients    map[int64]*Client
 	register   chan *Client
 	unregister chan *Client
@@ -52,14 +53,14 @@ func (h *Hub) Run(ctx context.Context) {
 			return
 
 		case client := <-h.register:
-			// Demo 规定一名用户只保留一条连接；重复登录时让新连接替换旧连接。
+			// 后建立的连接替换旧连接，并用专用关闭码告知旧客户端不要自动重连。
 			if previous := h.clients[client.UserID]; previous != nil && previous != client {
-				previous.disconnect()
+				previous.disconnectSessionReplaced()
 			}
 			h.clients[client.UserID] = client
 
 		case client := <-h.unregister:
-			// 旧连接晚到的下线通知不能误删同一用户后来建立的新连接。
+			// 被替换的旧连接晚到的注销通知不能误删刚上线的新连接。
 			if current := h.clients[client.UserID]; current == client {
 				delete(h.clients, client.UserID)
 				client.disconnect()
@@ -76,7 +77,6 @@ func (h *Hub) Run(ctx context.Context) {
 				continue
 			}
 
-			// Hub 只负责找到目标连接；Client 负责序列化并写入自己的发送队列。
 			request.result <- client.SendJSON(request.event)
 		}
 	}

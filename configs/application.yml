@@ -12,6 +12,13 @@ database:
   username: root
   password: root
 
+# 本机 Redis 连接参数。database 0 表示使用默认的逻辑库 DB 0。
+redis:
+  host: 127.0.0.1
+  port: 6379
+  password: ""
+  database: 0
+
 jwt:
   # JWT 的签发者；校验令牌时要求 iss 必须与它相同。
   issuer: rock-paper-scissors

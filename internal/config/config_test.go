@@ -20,6 +20,11 @@ func TestLoad(t *testing.T) {
 			"  name: rock_paper_scissors\n" +
 			"  username: root\n" +
 			"  password: test-password\n" +
+			"redis:\n" +
+			"  host: 127.0.0.1\n" +
+			"  port: 6379\n" +
+			"  password: ''\n" +
+			"  database: 0\n" +
 			"jwt:\n" +
 			"  issuer: rock-paper-scissors\n" +
 			"  secret: test-jwt-secret\n" +
@@ -46,6 +51,10 @@ func TestLoad(t *testing.T) {
 
 	if config.Database.Password != "test-password" {
 		t.Errorf("database password = %q, want %q", config.Database.Password, "test-password")
+	}
+
+	if config.Redis.Host != "127.0.0.1" || config.Redis.Port != 6379 || config.Redis.Database != 0 {
+		t.Errorf("redis config = %+v", config.Redis)
 	}
 
 	if config.JWT.Issuer != "rock-paper-scissors" || config.JWT.ExpiresInMinutes != 60 {
