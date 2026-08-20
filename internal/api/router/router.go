@@ -12,6 +12,7 @@ func New(
 	authHandler *handler.AuthHandler,
 	userHandler *handler.UserHandler,
 	roomHandler *handler.RoomHandler,
+	webSocketHandler *handler.WebSocketHandler,
 	tokenVerifier middleware.TokenVerifier,
 ) *gin.Engine {
 	// Default 创建 Gin 引擎，并自带 Logger 与 Recovery 中间件。
@@ -57,6 +58,12 @@ func New(
 		rooms.POST("/me/move", roomHandler.SubmitMove)
 		// 最终地址：DELETE /api/v1/rooms/me，表示当前用户退出所在房间。
 		rooms.DELETE("/me", roomHandler.LeaveCurrent)
+	}
+
+	// WebSocket 在握手 Handler 内校验查询参数中的 JWT，因此不复用只读取 Authorization Header 的中间件。
+	if webSocketHandler != nil {
+		// 最终地址：GET /api/v1/ws?token=<JWT>。
+		api.GET("/ws", webSocketHandler.Connect)
 	}
 
 	// main 会对配置完成的 Engine 调用 Run，真正启动 HTTP 服务。

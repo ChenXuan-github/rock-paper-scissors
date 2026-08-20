@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/config"
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/database"
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/game"
+	"github.com/ChenXuan-github/rock-paper-scissors/internal/realtime"
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/user"
 )
 
@@ -40,10 +42,16 @@ func main() {
 	// 房间只保存在当前进程内存中；整个服务共享同一个 RoomManager。
 	roomManager := game.NewRoomManager()
 	roomService := game.NewRoomService(roomManager)
-	roomHandler := handler.NewRoomHandler(roomService)
+	// Hub 在独立 goroutine 中串行管理全部在线 WebSocket 连接。
+	realtimeHub := realtime.NewHub()
+	go realtimeHub.Run(context.Background())
+	// 房间 Handler 通过 Hub 给在线玩家推送对局事件。
+	roomHandler := handler.NewRoomHandler(roomService, realtimeHub)
+	// WebSocket 握手时复用同一个 TokenService 校验登录身份。
+	webSocketHandler := handler.NewWebSocketHandler(tokenService, realtimeHub)
 
 	// 4. 注入 Router：受保护路由通过同一个 TokenService 校验 JWT。
-	r := router.New(authHandler, userHandler, roomHandler, tokenService)
+	r := router.New(authHandler, userHandler, roomHandler, webSocketHandler, tokenService)
 	// Sprintf 把整数端口拼成 Gin Run 所需的 ":8080" 监听地址。
 	address := fmt.Sprintf(":%d", cfg.Server.Port)
 

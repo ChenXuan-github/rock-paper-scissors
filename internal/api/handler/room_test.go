@@ -11,12 +11,22 @@ import (
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/api/response"
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/auth"
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/game"
+	"github.com/ChenXuan-github/rock-paper-scissors/internal/realtime"
 	"github.com/gin-gonic/gin"
 )
 
 type roomTestTokenVerifier struct {
 	userID   int64
 	username string
+}
+
+type roomTestEventPusher struct {
+	events map[int64][]realtime.Event
+}
+
+func (p *roomTestEventPusher) SendToUser(userID int64, event realtime.Event) error {
+	p.events[userID] = append(p.events[userID], event)
+	return nil
 }
 
 func (v roomTestTokenVerifier) Parse(string) (auth.Claims, error) {
@@ -308,7 +318,8 @@ func TestRoomHandlerSubmitMoveWaitsThenSettles(t *testing.T) {
 	if _, err := service.StartCurrentRoom(1); err != nil {
 		t.Fatalf("StartCurrentRoom() error = %v", err)
 	}
-	handler := NewRoomHandler(service)
+	pusher := &roomTestEventPusher{events: make(map[int64][]realtime.Event)}
+	handler := NewRoomHandler(service, pusher)
 
 	performMove := func(userID int64, username, move string) *httptest.ResponseRecorder {
 		router := gin.New()
@@ -348,6 +359,17 @@ func TestRoomHandlerSubmitMoveWaitsThenSettles(t *testing.T) {
 	if waitingBody.Data.OpponentMove != nil {
 		t.Fatalf("waiting opponentMove = %q, want nil", *waitingBody.Data.OpponentMove)
 	}
+	if len(pusher.events[1]) != 0 || len(pusher.events[2]) != 1 {
+		t.Fatalf("events after first move = %#v", pusher.events)
+	}
+	moveEvent := pusher.events[2][0]
+	if moveEvent.Type != "move_submitted" {
+		t.Fatalf("event type = %q, want move_submitted", moveEvent.Type)
+	}
+	moveData, ok := moveEvent.Data.(moveSubmittedEventData)
+	if !ok || moveData.SubmittedCount != 1 {
+		t.Fatalf("move event data = %#v", moveEvent.Data)
+	}
 
 	guestResponse := performMove(2, "guest", "scissors")
 	if guestResponse.Code != http.StatusOK {
@@ -362,6 +384,32 @@ func TestRoomHandlerSubmitMoveWaitsThenSettles(t *testing.T) {
 	}
 	if settledBody.Data.OpponentMove == nil || *settledBody.Data.OpponentMove != game.Rock.String() {
 		t.Fatalf("settled opponentMove = %#v, want rock", settledBody.Data.OpponentMove)
+	}
+
+	if len(pusher.events[1]) != 1 || len(pusher.events[2]) != 2 {
+		t.Fatalf("pushed events = %#v, want settlement for both players", pusher.events)
+	}
+	assertRoundSettledEvent(t, pusher.events[1][0], "rock", "scissors", "win")
+	assertRoundSettledEvent(t, pusher.events[2][1], "scissors", "rock", "lose")
+}
+
+func assertRoundSettledEvent(
+	t *testing.T,
+	event realtime.Event,
+	wantMove string,
+	wantOpponentMove string,
+	wantResult string,
+) {
+	t.Helper()
+	if event.Type != "round_settled" {
+		t.Fatalf("event type = %q, want round_settled", event.Type)
+	}
+	data, ok := event.Data.(roundSettledEventData)
+	if !ok {
+		t.Fatalf("event data type = %T, want roundSettledEventData", event.Data)
+	}
+	if data.Move != wantMove || data.OpponentMove != wantOpponentMove || data.Result != wantResult {
+		t.Fatalf("event data = %#v", data)
 	}
 }
 

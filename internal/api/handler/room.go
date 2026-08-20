@@ -8,6 +8,7 @@ import (
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/api/middleware"
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/api/response"
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/game"
+	"github.com/ChenXuan-github/rock-paper-scissors/internal/realtime"
 	"github.com/gin-gonic/gin"
 )
 
@@ -22,14 +23,28 @@ type roomApplicationService interface {
 	LeaveCurrentRoom(userID int64) (roomID string, roomDeleted bool, err error)
 }
 
+// userEventPusher 表示 RoomHandler 需要的“按用户推送实时事件”能力。
+// Hub 满足这个接口，但 Handler 不依赖 Hub 的连接管理实现细节。
+type userEventPusher interface {
+	SendToUser(userID int64, event realtime.Event) error
+}
+
 // RoomHandler 负责房间相关 HTTP 请求与领域对象之间的转换。
 type RoomHandler struct {
 	roomService roomApplicationService
+	eventPusher userEventPusher
 }
 
-// NewRoomHandler 注入房间业务服务。
-func NewRoomHandler(roomService roomApplicationService) *RoomHandler {
-	return &RoomHandler{roomService: roomService}
+// NewRoomHandler 注入房间业务服务；第二个参数可选，用于给在线玩家推送实时事件。
+func NewRoomHandler(roomService roomApplicationService, eventPushers ...userEventPusher) *RoomHandler {
+	var eventPusher userEventPusher
+	if len(eventPushers) > 0 {
+		eventPusher = eventPushers[0]
+	}
+	return &RoomHandler{
+		roomService: roomService,
+		eventPusher: eventPusher,
+	}
 }
 
 type roomPlayerResponse struct {
@@ -79,6 +94,19 @@ type submitMoveResponse struct {
 	Move           string  `json:"move"`
 	OpponentMove   *string `json:"opponentMove"`
 	Result         string  `json:"result"`
+}
+
+// roundSettledEventData 是推送给某一名玩家的本局结算视角。
+// 双方收到的 Move 与 OpponentMove 顺序、Result 都不相同。
+type roundSettledEventData struct {
+	Move         string `json:"move"`
+	OpponentMove string `json:"opponentMove"`
+	Result       string `json:"result"`
+}
+
+// moveSubmittedEventData 只公布提交人数，绝不包含尚未结算的具体拳型。
+type moveSubmittedEventData struct {
+	SubmittedCount int `json:"submittedCount"`
 }
 
 // Create 创建房间，并把 JWT 代表的当前用户作为房主加入房间。
@@ -358,10 +386,78 @@ func (h *RoomHandler) SubmitMove(c *gin.Context) {
 				break
 			}
 		}
+
+		// 第二名玩家提交后已经产生完整结果，此时主动把双方各自的视角推送出去。
+		h.pushRoundSettled(roundState)
+	} else {
+		// 第一名玩家提交后只通知对手“已有一人提交”，不发送具体拳型。
+		h.pushMoveSubmitted(userID, roundState.SubmittedCount)
 	}
 
 	// 无论当前是等待还是已经结算，只要本次提交成功，HTTP 状态都返回 200。
 	c.JSON(http.StatusOK, response.Success(moveResponse))
+}
+
+// pushMoveSubmitted 把不含拳型的提交进度推送给同房间的其他玩家。
+func (h *RoomHandler) pushMoveSubmitted(submitterUserID int64, submittedCount int) {
+	if h.eventPusher == nil {
+		return
+	}
+
+	// 通过当前用户的安全快照取得房间成员，不让 HTTP Handler 接触 Room 内部 Map。
+	snapshot, err := h.roomService.GetCurrentRoom(submitterUserID)
+	if err != nil {
+		log.Printf("load room for move submitted event: %v", err)
+		return
+	}
+
+	for _, player := range snapshot.Room.Players {
+		if player.UserID == submitterUserID {
+			continue
+		}
+		if err := h.eventPusher.SendToUser(player.UserID, realtime.Event{
+			Type: "move_submitted",
+			Data: moveSubmittedEventData{SubmittedCount: submittedCount},
+		}); err != nil {
+			// 对方离线不影响本次出拳，重连后仍可通过 /rooms/me 恢复进度。
+			log.Printf("push move submitted to user %d: %v", player.UserID, err)
+		}
+	}
+}
+
+// pushRoundSettled 给本局两名玩家分别组装并推送自己的结果视角。
+// WebSocket 离线或发送队列异常不影响已经完成的领域结算，只记录日志供排查。
+func (h *RoomHandler) pushRoundSettled(roundState game.RoundStateSnapshot) {
+	if h.eventPusher == nil {
+		return
+	}
+
+	for userID, result := range roundState.Results {
+		ownMove, exists := roundState.Moves[userID]
+		if !exists {
+			continue
+		}
+
+		var opponentMove game.Move
+		for otherUserID, submittedMove := range roundState.Moves {
+			if otherUserID != userID {
+				opponentMove = submittedMove
+				break
+			}
+		}
+
+		err := h.eventPusher.SendToUser(userID, realtime.Event{
+			Type: "round_settled",
+			Data: roundSettledEventData{
+				Move:         ownMove.String(),
+				OpponentMove: opponentMove.String(),
+				Result:       result.String(),
+			},
+		})
+		if err != nil {
+			log.Printf("push round result to user %d: %v", userID, err)
+		}
+	}
 }
 
 // LeaveCurrent 让 JWT 代表的当前用户退出所在房间。
