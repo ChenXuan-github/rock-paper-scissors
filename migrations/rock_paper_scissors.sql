@@ -78,3 +78,57 @@ CREATE TABLE IF NOT EXISTS game_records (
 ALTER TABLE game_records
     ADD COLUMN player1_score_after INT NOT NULL AFTER player1_score_change,
     ADD COLUMN player2_score_after INT NOT NULL AFTER player2_score_change;
+
+-- 好友关系表：把用户视为图上的节点，一行数据表示两个节点之间的一条无向边。
+CREATE TABLE IF NOT EXISTS friendships (
+    -- 始终把较小的用户 ID 放在 low、较大的放在 high，避免同时保存 A-B 和 B-A。
+    user_id_low BIGINT NOT NULL,
+    user_id_high BIGINT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- 联合主键既是关系主键，也从数据库层保证同一条无向边只能出现一次。
+    PRIMARY KEY (user_id_low, user_id_high),
+    -- 主键适合按 low 查询；反向索引让“当前用户位于 high”时也能快速找到好友。
+    KEY idx_friendships_high_low (user_id_high, user_id_low),
+    CONSTRAINT fk_friendships_user_low
+        FOREIGN KEY (user_id_low) REFERENCES users (id) ON DELETE CASCADE,
+    CONSTRAINT fk_friendships_user_high
+        FOREIGN KEY (user_id_high) REFERENCES users (id) ON DELETE CASCADE,
+    -- 同时禁止自己加自己，并强制所有调用方遵守“小 ID 在前”的规范。
+    CONSTRAINT chk_friendships_canonical_pair
+        CHECK (user_id_low < user_id_high)
+) ENGINE = InnoDB
+  DEFAULT CHARACTER SET = utf8mb4
+  COLLATE = utf8mb4_0900_ai_ci;
+
+-- 好友申请表：保存有方向的申请流程；WebSocket 只负责实时通知，不替代这里的持久化。
+CREATE TABLE IF NOT EXISTS friend_requests (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    requester_id BIGINT NOT NULL,
+    receiver_id BIGINT NOT NULL,
+    -- 生成列把有方向的申请规范化成无方向用户对，用于阻止 A→B 与 B→A 重复存在。
+    pair_user_id_low BIGINT GENERATED ALWAYS AS (LEAST(requester_id, receiver_id)) STORED,
+    pair_user_id_high BIGINT GENERATED ALWAYS AS (GREATEST(requester_id, receiver_id)) STORED,
+    status VARCHAR(16) NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    -- 申请尚未处理时为 NULL；接受或拒绝时由业务层写入处理时间。
+    responded_at TIMESTAMP NULL DEFAULT NULL,
+    PRIMARY KEY (id),
+    -- 一对用户只维护一条申请生命周期；拒绝后重新申请时更新这条记录，而不是无限插入。
+    UNIQUE KEY uk_friend_requests_pair (pair_user_id_low, pair_user_id_high),
+    -- 收件箱和发件箱都按状态、时间查询，因此分别建立联合索引。
+    KEY idx_friend_requests_receiver_status_created (receiver_id, status, created_at),
+    KEY idx_friend_requests_requester_status_created (requester_id, status, created_at),
+    -- requester/receiver 是生成列的基础列，MySQL 不允许这里使用 ON DELETE CASCADE。
+    -- 当前项目不硬删除用户；默认 RESTRICT 还能避免申请记录变成没有用户的孤儿数据。
+    CONSTRAINT fk_friend_requests_requester
+        FOREIGN KEY (requester_id) REFERENCES users (id),
+    CONSTRAINT fk_friend_requests_receiver
+        FOREIGN KEY (receiver_id) REFERENCES users (id),
+    CONSTRAINT chk_friend_requests_different_users
+        CHECK (requester_id <> receiver_id),
+    CONSTRAINT chk_friend_requests_status
+        CHECK (status IN ('pending', 'accepted', 'rejected', 'cancelled'))
+) ENGINE = InnoDB
+  DEFAULT CHARACTER SET = utf8mb4
+  COLLATE = utf8mb4_0900_ai_ci;

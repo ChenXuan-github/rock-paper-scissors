@@ -18,6 +18,7 @@ import (
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/record"
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/score"
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/settlement"
+	"github.com/ChenXuan-github/rock-paper-scissors/internal/social"
 	"github.com/ChenXuan-github/rock-paper-scissors/internal/user"
 )
 
@@ -97,6 +98,18 @@ func main() {
 	// 自动匹配复用同一个 RoomService 创建房间，并通过现有 Hub 通知双方。
 	matchmakingService := matchmaking.NewService(matchmakingQueue, roomService, userService, realtimeHub)
 	matchmakingHandler := handler.NewMatchmakingHandler(matchmakingService)
+	// 好友申请和无向好友关系共用 MySQL，并复用 UserService 批量查询安全用户摘要。
+	socialService := social.NewService(db, userService)
+	socialHandler := handler.NewSocialHandler(socialService, scoreService, realtimeHub)
+	// 对战邀请只保存 60 秒内的临时状态，接受后复用现有 RoomService 自动建立 1v1 房间。
+	gameInvitationService := social.NewGameInvitationService(
+		social.NewGameInvitationManager(),
+		social.NewMySQLFriendshipRepository(db),
+		userService,
+		roomService,
+		realtimeHub,
+	)
+	gameInvitationHandler := handler.NewGameInvitationHandler(gameInvitationService)
 
 	// 5. 注入 Router：受保护路由通过同一个 TokenService 校验 JWT。
 	r := router.New(
@@ -105,6 +118,8 @@ func main() {
 		roomHandler,
 		competitionHandler,
 		matchmakingHandler,
+		socialHandler,
+		gameInvitationHandler,
 		webSocketHandler,
 		tokenService,
 	)

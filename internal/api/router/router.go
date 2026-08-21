@@ -14,6 +14,8 @@ func New(
 	roomHandler *handler.RoomHandler,
 	competitionHandler *handler.CompetitionHandler,
 	matchmakingHandler *handler.MatchmakingHandler,
+	socialHandler *handler.SocialHandler,
+	gameInvitationHandler *handler.GameInvitationHandler,
 	webSocketHandler *handler.WebSocketHandler,
 	tokenVerifier middleware.TokenVerifier,
 ) *gin.Engine {
@@ -31,6 +33,33 @@ func New(
 		// 最终地址：/api/v1/auth/register 与 /api/v1/auth/login。
 		auth.POST("/register", authHandler.Register)
 		auth.POST("/login", authHandler.Login)
+	}
+
+	// 好友对战邀请只允许已登录用户创建和处理。
+	if gameInvitationHandler != nil && tokenVerifier != nil {
+		gameInvitations := api.Group("/game-invitations")
+		gameInvitations.Use(middleware.Authenticate(tokenVerifier))
+		gameInvitations.POST("", gameInvitationHandler.Invite)
+		gameInvitations.POST("/:invitationID/accept", gameInvitationHandler.Accept)
+		gameInvitations.POST("/:invitationID/reject", gameInvitationHandler.Reject)
+		gameInvitations.DELETE("/:invitationID", gameInvitationHandler.Cancel)
+	}
+
+	// 好友关系和好友申请的操作者都取自 JWT，不接受客户端自行指定当前用户 ID。
+	if socialHandler != nil && tokenVerifier != nil {
+		friends := api.Group("/friends")
+		friends.Use(middleware.Authenticate(tokenVerifier))
+		friends.GET("", socialHandler.ListFriends)
+		friends.DELETE("/:friendID", socialHandler.RemoveFriend)
+
+		friendRequests := api.Group("/friend-requests")
+		friendRequests.Use(middleware.Authenticate(tokenVerifier))
+		friendRequests.POST("", socialHandler.SendFriendRequest)
+		friendRequests.GET("/incoming", socialHandler.ListIncomingFriendRequests)
+		friendRequests.GET("/outgoing", socialHandler.ListOutgoingFriendRequests)
+		friendRequests.POST("/:requestID/accept", socialHandler.AcceptFriendRequest)
+		friendRequests.POST("/:requestID/reject", socialHandler.RejectFriendRequest)
+		friendRequests.DELETE("/:requestID", socialHandler.CancelFriendRequest)
 	}
 
 	// 积分与战绩同样依赖 JWT，客户端不能通过参数查询并冒充其他用户。

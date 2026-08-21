@@ -13,6 +13,11 @@ type onlineRequest struct {
 	result chan bool
 }
 
+type onlineUsersRequest struct {
+	userIDs []int64
+	result  chan map[int64]bool
+}
+
 type deliveryRequest struct {
 	userID int64
 	event  Event
@@ -23,21 +28,23 @@ type deliveryRequest struct {
 // clients 只由 Run 所在的一个 goroutine 访问，因此不需要再给 map 加 Mutex。
 type Hub struct {
 	// 当前产品策略是一名用户只保留最后建立的一条实时连接。
-	clients    map[int64]*Client
-	register   chan *Client
-	unregister chan *Client
-	online     chan onlineRequest
-	delivery   chan deliveryRequest
+	clients     map[int64]*Client
+	register    chan *Client
+	unregister  chan *Client
+	online      chan onlineRequest
+	onlineUsers chan onlineUsersRequest
+	delivery    chan deliveryRequest
 }
 
 // NewHub 创建尚未启动的连接管理器；调用者还需要执行 go hub.Run(ctx)。
 func NewHub() *Hub {
 	return &Hub{
-		clients:    make(map[int64]*Client),
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
-		online:     make(chan onlineRequest),
-		delivery:   make(chan deliveryRequest),
+		clients:     make(map[int64]*Client),
+		register:    make(chan *Client),
+		unregister:  make(chan *Client),
+		online:      make(chan onlineRequest),
+		onlineUsers: make(chan onlineUsersRequest),
+		delivery:    make(chan deliveryRequest),
 	}
 }
 
@@ -70,6 +77,13 @@ func (h *Hub) Run(ctx context.Context) {
 			_, exists := h.clients[request.userID]
 			request.result <- exists
 
+		case request := <-h.onlineUsers:
+			states := make(map[int64]bool, len(request.userIDs))
+			for _, userID := range request.userIDs {
+				_, states[userID] = h.clients[userID]
+			}
+			request.result <- states
+
 		case request := <-h.delivery:
 			client := h.clients[request.userID]
 			if client == nil {
@@ -97,6 +111,13 @@ func (h *Hub) Unregister(client *Client) {
 func (h *Hub) IsOnline(userID int64) bool {
 	result := make(chan bool)
 	h.online <- onlineRequest{userID: userID, result: result}
+	return <-result
+}
+
+// OnlineUsers 在 Hub 的管理 goroutine 内一次查询多名用户，避免调用方逐人进行 channel 往返。
+func (h *Hub) OnlineUsers(userIDs []int64) map[int64]bool {
+	result := make(chan map[int64]bool)
+	h.onlineUsers <- onlineUsersRequest{userIDs: userIDs, result: result}
 	return <-result
 }
 
